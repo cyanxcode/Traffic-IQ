@@ -21,7 +21,7 @@
 </script>
 
 <div class="control-group">
-	<h3>🚗 Add Vehicles</h3>
+	<h3 class="text-xl font-semibold">Add Vehicles</h3>
 	<div class="corner-buttons">
 		<button class="text-lg" on:click={() => addVehicleFrom('topLeft')}>↖ Top-Left</button>
 		<button class="text-lg" on:click={() => addVehicleFrom('topRight')}>↗ Top-Right</button>

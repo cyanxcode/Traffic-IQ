@@ -16,9 +16,16 @@ const STOP_DISTANCE_FROM_CENTER = 60;
 const VEHICLE_SPACING = 80;
 
 const FPS = 60;
-const PHASE_DURATION = 15;
 const ACCELERATION = 0.05;
 const BRAKING = 0.15;
+
+// --- AI Tuning Constants ---
+const MIN_PHASE_TIME = 8;
+const MAX_PHASE_TIME = 35;
+const ALL_RED_DURATION = 2; // NEW: Duration for the all-red clearing phase
+const PRIORITY_THRESHOLD = 1.5;
+const WEIGHT_CAR_COUNT = 1.0;
+const WEIGHT_WAIT_TIME = 0.2;
 
 const CAR_IMAGE_PATHS = {
 	TL_BR: ['/cars/blue-tl.png', '/cars/yellow-tl.png', '/cars/red-tl.png', '/cars/green-tl.png'],
@@ -27,7 +34,6 @@ const CAR_IMAGE_PATHS = {
 	BR_TL: ['/cars/blue-br.png', '/cars/yellow-br.png', '/cars/red-br.png', '/cars/green-br.png']
 };
 
-// NEW: Define paths for the signal images
 const SIGNAL_IMAGE_PATHS = {
 	red: '/signals/RedLight.png',
 	green: '/signals/GreenLight.png'
@@ -65,6 +71,7 @@ class Vehicle {
 		this.distanceTraveled = 0;
 		this.speed = 0;
 		this.maxSpeed = 2.5;
+		this.waitTime = 0;
 		const flowKey = getFlowKey(startCornerKey, endCornerKey);
 		const availableImages = CAR_IMAGE_PATHS[flowKey];
 		if (availableImages && availableImages.length > 0) {
@@ -91,7 +98,8 @@ const initialGameState = {
 	vehicleIdCounter: 0,
 	completedVehicles: 0,
 	startTime: Date.now(),
-	currentPhase: 'TL_BR',
+	currentPhase: 'TL_BR', // Phases can be 'TL_BR', 'TR_BL', or 'ALL_RED'
+	nextPhase: 'TR_BL', // NEW: Stores which phase comes after ALL_RED
 	phaseTimer: 0
 };
 
@@ -99,7 +107,7 @@ function createSimulationStore() {
 	const fullInitialState = {
 		...initialGameState,
 		loadedCarImages: {},
-		loadedSignalImages: {} // NEW: Add a cache for signal images
+		loadedSignalImages: {}
 	};
 
 	const { subscribe, update, set } = writable(fullInitialState);
@@ -118,36 +126,104 @@ function createSimulationStore() {
 		return { carAhead, distance: minDistanceAhead };
 	};
 
+	const getFlowData = (vehicles, currentPhase) => {
+		const flowData = {
+			TL_BR: { count: 0, totalWaitTime: 0 },
+			TR_BL: { count: 0, totalWaitTime: 0 }
+		};
+		const tl_br_keys = ['topLeft', 'bottomRight'];
+		const is_TL_BR_green = currentPhase === 'TL_BR';
+		for (const vehicle of vehicles) {
+			const is_vehicle_in_TL_BR_flow = tl_br_keys.includes(vehicle.startCornerKey);
+			if (vehicle.speed < 0.1) {
+				if (is_vehicle_in_TL_BR_flow && !is_TL_BR_green) {
+					flowData.TL_BR.count++;
+					flowData.TL_BR.totalWaitTime += vehicle.waitTime;
+				} else if (!is_vehicle_in_TL_BR_flow && is_TL_BR_green) {
+					flowData.TR_BL.count++;
+					flowData.TR_BL.totalWaitTime += vehicle.waitTime;
+				}
+			}
+		}
+		return flowData;
+	};
+
 	const updateSimulation = () => {
 		update((state) => {
 			if (!state.isRunning) return state;
 			const timeDelta = (1 / FPS) * state.simulationSpeed;
 			let newState = { ...state };
+
+			newState.vehicles.forEach((v) => {
+				if (v.speed < 0.1) v.waitTime += timeDelta;
+				else v.waitTime = 0;
+			});
+
+			// --- NEW: Traffic light logic with ALL_RED phase ---
 			newState.phaseTimer += timeDelta;
-			if (newState.phaseTimer >= PHASE_DURATION) {
-				newState.phaseTimer = 0;
-				newState.currentPhase = newState.currentPhase === 'TL_BR' ? 'TR_BL' : 'TL_BR';
+
+			if (newState.currentPhase === 'ALL_RED') {
+				if (newState.phaseTimer >= ALL_RED_DURATION) {
+					newState.currentPhase = newState.nextPhase;
+					newState.nextPhase = newState.nextPhase === 'TL_BR' ? 'TR_BL' : 'TL_BR';
+					newState.phaseTimer = 0;
+				}
+			} else {
+				// If in a green phase
+				let shouldSwitch = false;
+				const flowData = getFlowData(newState.vehicles, newState.currentPhase);
+				const priority_TL_BR =
+					flowData.TL_BR.count * WEIGHT_CAR_COUNT + flowData.TL_BR.totalWaitTime * WEIGHT_WAIT_TIME;
+				const priority_TR_BL =
+					flowData.TR_BL.count * WEIGHT_CAR_COUNT + flowData.TR_BL.totalWaitTime * WEIGHT_WAIT_TIME;
+				const currentPriority = newState.currentPhase === 'TL_BR' ? priority_TL_BR : priority_TR_BL;
+				const opposingPriority =
+					newState.currentPhase === 'TL_BR' ? priority_TR_BL : priority_TL_BR;
+
+				if (currentPriority === 0 && opposingPriority > 0 && newState.phaseTimer > 3) {
+					shouldSwitch = true;
+				} else if (
+					newState.phaseTimer >= MIN_PHASE_TIME &&
+					opposingPriority > currentPriority * PRIORITY_THRESHOLD
+				) {
+					shouldSwitch = true;
+				} else if (newState.phaseTimer >= MAX_PHASE_TIME) {
+					shouldSwitch = true;
+				}
+
+				if (shouldSwitch) {
+					newState.currentPhase = 'ALL_RED';
+					newState.phaseTimer = 0;
+				}
 			}
+			// --- END NEW LOGIC ---
+
 			newState.vehicles.sort((a, b) => b.distanceTraveled - a.distanceTraveled);
 			const updatedVehicles = newState.vehicles.map((vehicle) => {
 				const newVehicle = { ...vehicle };
 				const tl_br_flow = ['topLeft', 'bottomRight'];
-				const isMyFlowGreen =
+
+				// An active green light now only happens in the specific green phases
+				let isMyFlowGreen =
 					(newState.currentPhase === 'TL_BR' && tl_br_flow.includes(newVehicle.startCornerKey)) ||
 					(newState.currentPhase === 'TR_BL' && !tl_br_flow.includes(newVehicle.startCornerKey));
+
 				let targetSpeed = newVehicle.maxSpeed;
-				const isApproachingRedLight =
-					!isMyFlowGreen && newVehicle.distanceTraveled < newVehicle.distanceToStopLine;
-				if (isApproachingRedLight) {
+
+				// A car only stops if its light is NOT green AND it is BEFORE the stop line.
+				// This allows cars already in the intersection to clear it.
+				if (!isMyFlowGreen && newVehicle.distanceTraveled < newVehicle.distanceToStopLine) {
 					const distanceToStop = newVehicle.distanceToStopLine - newVehicle.distanceTraveled;
 					if (distanceToStop < VEHICLE_SPACING * 1.5) {
 						targetSpeed = 0;
 					}
 				}
+
 				const { carAhead, distance } = getCarAhead(newVehicle, newState.vehicles);
 				if (carAhead && distance < VEHICLE_SPACING) {
 					targetSpeed = Math.min(targetSpeed, carAhead.speed * 0.9);
 				}
+
 				if (
 					newVehicle.speed < 0.1 &&
 					Math.abs(newVehicle.distanceTraveled - newVehicle.distanceToStopLine) < 5 &&
@@ -155,11 +231,13 @@ function createSimulationStore() {
 				) {
 					targetSpeed = 0;
 				}
+
 				if (newVehicle.speed < targetSpeed) {
 					newVehicle.speed = Math.min(targetSpeed, newVehicle.speed + ACCELERATION);
 				} else if (newVehicle.speed > targetSpeed) {
 					newVehicle.speed = Math.max(targetSpeed, newVehicle.speed - BRAKING);
 				}
+
 				if (newVehicle.speed < 0.01) newVehicle.speed = 0;
 				const moveX = newVehicle.nx * newVehicle.speed * newState.simulationSpeed;
 				const moveY = newVehicle.ny * newVehicle.speed * newState.simulationSpeed;
@@ -192,32 +270,22 @@ function createSimulationStore() {
 			return newState;
 		});
 	};
-
-	// MODIFIED: This function now preloads ALL assets (cars and signals)
 	const preloadAssets = () => {
 		const carImagesToLoad = {};
 		const signalImagesToLoad = {};
-
 		const allImagePaths = [
 			...Object.values(CAR_IMAGE_PATHS).flat(),
 			...Object.values(SIGNAL_IMAGE_PATHS)
 		];
-
 		let loadCount = 0;
 		const totalImages = allImagePaths.length;
-
 		if (totalImages === 0) return;
-
 		allImagePaths.forEach((path) => {
 			const img = new Image();
 			img.src = path;
 			img.onload = () => {
-				if (path.includes('/cars/')) {
-					carImagesToLoad[path] = img;
-				} else if (path.includes('/signals/')) {
-					signalImagesToLoad[path] = img;
-				}
-
+				if (path.includes('/cars/')) carImagesToLoad[path] = img;
+				else if (path.includes('/signals/')) signalImagesToLoad[path] = img;
 				loadCount++;
 				if (loadCount === totalImages) {
 					update((s) => ({
@@ -248,7 +316,6 @@ function createSimulationStore() {
 	return {
 		subscribe,
 		updateSimulation,
-		PHASE_DURATION,
 		addVehicle: (startCornerKey, endCornerKey) => {
 			update((s) => {
 				const newVehicle = new Vehicle(s.vehicleIdCounter, startCornerKey, endCornerKey);
@@ -264,7 +331,7 @@ function createSimulationStore() {
 				...initialGameState,
 				startTime: Date.now(),
 				loadedCarImages: s.loadedCarImages,
-				loadedSignalImages: s.loadedSignalImages // Preserve signal images on reset
+				loadedSignalImages: s.loadedSignalImages
 			}));
 		},
 		togglePlayPause: () => update((s) => ({ ...s, isRunning: !s.isRunning })),

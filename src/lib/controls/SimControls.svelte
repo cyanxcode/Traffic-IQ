@@ -3,7 +3,7 @@
 </script>
 
 <div class="control-group">
-	<h3>Simulation Control</h3>
+	<h3 class="text-xl font-semibold">Simulation Control</h3>
 	<div class="grid grid-cols-2">
 		<button on:click={simulationStore.togglePlayPause}>
 			{#if $simulationStore.isRunning}

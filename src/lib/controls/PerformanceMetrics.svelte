@@ -8,24 +8,23 @@
 
 	// Reactive calculations
 	$: {
-		const { completedVehicles, totalWaitTime, startTime, vehicles } = $simulationStore;
-
-		const avgWait = completedVehicles > 0 ? totalWaitTime / completedVehicles : 0;
+		const { completedVehicles, startTime, vehicles } = $simulationStore;
+		//const avgWait = completedVehicles > 0 ? totalWaitTime / completedVehicles : 0;
 		const timeElapsed = (Date.now() - startTime) / 1000 / 60; // in minutes
 		const tput = timeElapsed > 0 ? completedVehicles / timeElapsed : 0;
+		totalQueue = vehicles.length;
+		const totalVehicles = completedVehicles + vehicles.length;
+		efficiency =
+			totalVehicles > 0 ? ((completedVehicles / totalVehicles) * 100).toFixed(1) + '%' : '100%';
 
-		avgWaitTime = `${avgWait.toFixed(1)}s`;
+		//avgWaitTime = `${avgWait.toFixed(1)}s`;
 		throughput = tput.toFixed(0);
 	}
 </script>
 
 <div class="control-group">
-	<h3>📊 Performance Metrics</h3>
+	<h3 class="text-xl font-semibold">Performance Metrics</h3>
 	<div class="grid grid-cols-2 gap-4">
-		<div class="metric">
-			<div class="metric-value">{avgWaitTime}</div>
-			<div class="metric-label">Avg Wait Time</div>
-		</div>
 		<div class="metric">
 			<div class="metric-value">{throughput}</div>
 			<div class="metric-label">Throughput/min</div>
